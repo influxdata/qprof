@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -67,6 +68,7 @@ var (
 )
 
 var clt client.Client
+var httpClient *http.Client
 var err error
 
 // Used to store relevant data around the execution of this program.
@@ -160,6 +162,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer clt.Close()
+
+	// Override transport for gathering profiles if -k set.
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSSL}}
+	httpClient = &http.Client{Transport: tr}
 
 	if err := run(); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -342,7 +348,7 @@ func takeProfile(w io.Writer, name string, debug int) error {
 		u.RawQuery = q.Encode()
 	}
 
-	resp, err := http.Get(u.String())
+	resp, err := httpClient.Get(u.String())
 	if err != nil {
 		return err
 	}
