@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 	"time"
 
 	client "github.com/influxdata/influxdb/client/v2"
@@ -24,16 +25,17 @@ import (
 var ErrUnsupportedProfile = errors.New("profile unsupported")
 
 type profile struct {
-	Name  string
-	Fname string
-	Debug int
+	Name       string
+	Fname      string
+	Debug      int
+	Concurrent bool
 }
 
 // cpu must always be the first profile.
 var profiles = []profile{
-	{Name: "profile", Fname: "cpu.pb.gz"},
+	{Name: "profile", Fname: "cpu.pb.gz", Concurrent: true},
 	{Name: "block", Fname: "block.txt", Debug: 1},
-	{Name: "goroutine", Fname: "goroutine.txt", Debug: 1},
+	{Name: "goroutine", Fname: "goroutine.txt", Debug: 1, Concurrent: true},
 	{Name: "heap", Fname: "heap.pb.gz", Debug: 1},
 	{Name: "mutex", Fname: "mutex.txt", Debug: 1},
 }
@@ -74,7 +76,34 @@ var totalTime time.Duration
 
 // Duplicates writes to os.Stderr and file in archive.
 var stderr io.Writer
-var logger *log.Logger
+var logger *Logger
+
+// Logger provides a log.Logger that's safe for concurrent use by multiple goroutines.
+type Logger struct {
+	mu sync.Mutex
+	*log.Logger
+}
+
+// Print calls Print on the underlying log.Logger.
+func (l *Logger) Print(v ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.Logger.Print(v...)
+}
+
+// Println calls Println on the underlying log.Logger.
+func (l *Logger) Println(v ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.Logger.Println(v...)
+}
+
+// Printf calls Printf on the underlying log.Logger.
+func (l *Logger) Printf(format string, v ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.Logger.Printf(format, v...)
+}
 
 func main() {
 	flag.StringVar(&host, "host", "http://localhost:8086", "scheme://host:port of server/cluster/load balancer. (default: http://localhost:8086)")
@@ -100,7 +129,7 @@ func main() {
 
 	// Tee output to user and file inside profile.
 	stderr = io.MultiWriter(&infoBuf, os.Stderr)
-	logger = log.New(stderr, "", log.LstdFlags)
+	logger = &Logger{Logger: log.New(stderr, "", log.LstdFlags)}
 
 	// Store options set.
 	infoBuf.WriteString("Flags:\n")
@@ -136,55 +165,52 @@ func main() {
 	}
 }
 
+// TarWriter provides a tar.Writer that's safe for concurrent use by multiple
+// goroutines.
+type TarWriter struct {
+	mu sync.Mutex
+	*tar.Writer
+}
+
+// Write writes to the TarWriter. Write is safe for concurrent access from
+// multiple goroutines.
+func (tw *TarWriter) Write(b []byte) (int, error) {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+	return tw.Writer.Write(b)
+}
+
 func run() error {
 	var allBuf bytes.Buffer // Buffer for entire archive.
-	var buf bytes.Buffer    // Temporary buffer for each profile result.
 
 	gz := gzip.NewWriter(&allBuf)
 	defer gz.Close()
-	tw := tar.NewWriter(gz)
+
+	tw := &TarWriter{Writer: tar.NewWriter(gz)}
 	defer tw.Close()
-
-	captureProfile := func(p profile) error {
-		if p.Name == "profile" {
-			logger.Print("Capturing CPU profile. This will take 30s...")
-		}
-
-		if err := takeProfile(&buf, p.Name, p.Debug); err == ErrUnsupportedProfile {
-			logger.Printf("Skipping profile %q (unavailable or profiling disabled)", p.Name)
-			return nil // unsupported profile.
-		} else if err != nil {
-			return err
-		}
-
-		err := tw.WriteHeader(&tar.Header{
-			Name:    p.Fname,
-			Mode:    0600,
-			ModTime: time.Now().UTC(),
-			Size:    int64(buf.Len()),
-		})
-		if err != nil {
-			return err
-		}
-
-		// Write the profile file's data to the tar writer.
-		if _, err = io.Copy(tw, &buf); err != nil {
-			return err
-		}
-
-		// Reset the buffer for the next profile.
-		buf.Reset()
-		logger.Printf("%q profile captured...\n", p.Name)
-		return nil
-	}
 
 	// Take the base profiles.
 	for _, p := range profiles {
 		p.Fname = fmt.Sprintf("base-%s", p.Fname)
-		if err := captureProfile(p); err != nil {
+		if err := writeProfile(p, tw); err != nil {
 			return err
 		}
 	}
+
+	// Take concurrent profiles once queries begin executing.
+	errCh := make(chan error, len(profiles))
+	go func() {
+		defer close(errCh)
+		log.Print("Waiting 15 seconds before taking concurrent profiles...")
+		time.Sleep(15 * time.Second)
+		for _, p := range profiles {
+			if !p.Concurrent {
+				continue
+			}
+			p.Fname = fmt.Sprintf("concurrent-%s", p.Fname)
+			errCh <- writeProfile(p, tw)
+		}
+	}()
 
 	// Run the queries
 	logger.Print("Begin query execution...")
@@ -219,11 +245,18 @@ func run() error {
 	// Take the final profiles
 	logger.Print("Taking final profiles...")
 	for _, p := range profiles {
-		if err := captureProfile(p); err != nil {
+		if err := writeProfile(p, tw); err != nil {
 			return err
 		}
 	}
 	logger.Printf("All profiles gathered and saved at %s. Total query executions: %d.", archivePath, totalExecutions)
+
+	// Wait for concurrent profiles, if any...
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
 
 	// Finally, write the general data about the running of this program.
 	err := tw.WriteHeader(&tar.Header{
@@ -259,6 +292,39 @@ func run() error {
 
 	_, err = io.Copy(fd, &allBuf)
 	return err
+}
+
+func writeProfile(p profile, tw *TarWriter) error {
+	var buf bytes.Buffer
+
+	if p.Name == "profile" {
+		logger.Print("Capturing CPU profile. This will take 30s...")
+	}
+
+	if err := takeProfile(&buf, p.Name, p.Debug); err == ErrUnsupportedProfile {
+		logger.Printf("Skipping profile %q (unavailable or profiling disabled)", p.Name)
+		return nil // unsupported profile.
+	} else if err != nil {
+		return err
+	}
+
+	err := tw.WriteHeader(&tar.Header{
+		Name:    p.Fname,
+		Mode:    0600,
+		ModTime: time.Now().UTC(),
+		Size:    int64(buf.Len()),
+	})
+	if err != nil {
+		return err
+	}
+
+	// Write the profile file's data to the tar writer.
+	if _, err = io.Copy(tw, &buf); err != nil {
+		return err
+	}
+
+	logger.Printf("%q profile captured...\n", p.Name)
+	return nil
 }
 
 // takeProfile takes the named profile and writes the result to w.
