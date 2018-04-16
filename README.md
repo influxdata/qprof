@@ -50,6 +50,7 @@ Usage of qprof:
     	Database to query (required)
   -host string
     	scheme://host:port of server/cluster/load balancer. (default: http://localhost:8086) 
+  -k	Skip SSL certificate validation
   -n int
     	Repeat query n times (default 1)
   -out string
@@ -72,6 +73,10 @@ Here are some example uses:
 $ qprof -db mydb -host http://example.com:8086 -t 10m "SELECT count(*) FROM m9 WHERE time > now() - 4m"
 ```
 
+```
+// Connect to a TLS (SSL) enabled server with a self-signed certificate.
+$ qprof -db mydb -k -host https://example.com:8086 -t 10m "SELECT count(*) FROM m9 WHERE time > now() - 4m"
+```
 
 ```
 // Save the output archive to /tmp directory

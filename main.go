@@ -47,8 +47,9 @@ Example usage: $ qprof -db mydb -d 5m "SELECT * FROM cpu WHERE tag1 = 'foo'"
 
 // Server connection flags
 var (
-	host       string
-	user, pass string
+	host        string
+	user, pass  string
+	insecureSSL bool
 )
 
 // Database and query options
@@ -109,6 +110,7 @@ func main() {
 	flag.StringVar(&host, "host", "http://localhost:8086", "scheme://host:port of server/cluster/load balancer. (default: http://localhost:8086)")
 	flag.StringVar(&user, "user", "", "Username if using authentication (optional)")
 	flag.StringVar(&pass, "pass", "", "Password if using authentication (optional)")
+	flag.BoolVar(&insecureSSL, "k", false, "Skip SSL certificate validation")
 
 	flag.StringVar(&db, "db", "", "Database to query (required)")
 	flag.IntVar(&n, "n", 1, "Repeat query n times (default 1 if -d not specified)")
@@ -360,9 +362,10 @@ func takeProfile(w io.Writer, name string, debug int) error {
 // a running server.
 func NewClient() (client.Client, error) {
 	c, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr:     host,
-		Username: user,
-		Password: pass,
+		Addr:               host,
+		Username:           user,
+		Password:           pass,
+		InsecureSkipVerify: insecureSSL,
 	})
 	if err != nil {
 		return nil, err
