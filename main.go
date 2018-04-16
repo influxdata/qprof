@@ -63,6 +63,10 @@ var infoBuf bytes.Buffer
 var archivePath string
 var totalExecutions int
 
+// Duplicates writes to os.Stderr and file in archive.
+var stderr io.Writer
+var logger *log.Logger
+
 func main() {
 	flag.StringVar(&host, "host", "http://localhost:8086", "scheme://host:port of server/cluster/load balancer. (default: http://localhost:8086)")
 	flag.StringVar(&user, "user", "", "Username if using authentication (optional)")
@@ -85,14 +89,19 @@ func main() {
 	}
 	query = flag.Arg(0)
 
+	// Tee output to user and file inside profile.
+	stderr = io.MultiWriter(&infoBuf, os.Stderr)
+	logger = log.New(stderr, "", log.LstdFlags)
+
 	// Store options set.
 	infoBuf.WriteString("Flags:\n")
 	flag.VisitAll(func(f *flag.Flag) {
 		if _, err := infoBuf.WriteString(fmt.Sprintf("-%s %v\n", f.Name, f.Value.String())); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(stderr, err)
 			os.Exit(1)
 		}
 	})
+	infoBuf.WriteString("\n")
 
 	if !cpu {
 		profiles = profiles[1:]
@@ -100,24 +109,22 @@ func main() {
 
 	// Check out directory is available.
 	if err := os.MkdirAll(out, 0600); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(stderr, err)
 		os.Exit(1)
 	}
 	archivePath = filepath.Join(out, "profiles.tar.gz")
 
 	// Check we can connect to the server.
 	if clt, err = NewClient(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(stderr, err)
 		os.Exit(1)
 	}
 	defer clt.Close()
 
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(stderr, err)
 		os.Exit(1)
 	}
-
-	log.Printf("All profiles gathered and saved at %s. Total query executions: %d.", archivePath, totalExecutions)
 }
 
 func run() error {
@@ -131,7 +138,7 @@ func run() error {
 
 	captureProfile := func(p profile) error {
 		if p.Name == "profile" {
-			log.Print("Capturing CPU profile. This will take 30s...")
+			logger.Print("Capturing CPU profile. This will take 30s...")
 		}
 
 		if err := takeProfile(&buf, p.Name, p.Debug); err != nil {
@@ -155,7 +162,7 @@ func run() error {
 
 		// Reset the buffer for the next profile.
 		buf.Reset()
-		log.Printf("%q profile captured...\n", p.Name)
+		logger.Printf("%q profile captured...\n", p.Name)
 		return nil
 	}
 
@@ -168,7 +175,7 @@ func run() error {
 	}
 
 	// Run the queries
-	log.Print("Begin query execution...")
+	logger.Print("Begin query execution...")
 	if d == 0 {
 		for i := 0; i < n; i++ {
 			if err := runQuery(); err != nil {
@@ -181,7 +188,7 @@ func run() error {
 		for {
 			select {
 			case <-timer.C:
-				log.Printf("Queries executed for at least %v", d)
+				logger.Printf("Queries executed for at least %v", d)
 				break OUTER
 			default:
 				if err := runQuery(); err != nil {
@@ -192,15 +199,15 @@ func run() error {
 	}
 
 	// Take the final profiles
-	log.Print("Taking final profiles...")
+	logger.Print("Taking final profiles...")
 	for _, p := range profiles {
 		if err := captureProfile(p); err != nil {
 			return err
 		}
 	}
+	logger.Printf("All profiles gathered and saved at %s. Total query executions: %d.", archivePath, totalExecutions)
 
 	// Finally, write the general data about the running of this program.
-	infoBuf.WriteString(fmt.Sprintf("\n Total executions: %d", totalExecutions))
 	err := tw.WriteHeader(&tar.Header{
 		Name:    "info.txt",
 		Mode:    0600,
@@ -275,7 +282,7 @@ func NewClient() (client.Client, error) {
 		return nil, err
 	}
 
-	log.Printf("Host %s responded to a ping in %v\n", host, dur)
+	logger.Printf("Host %s responded to a ping in %v\n", host, dur)
 	return c, nil
 }
 
@@ -286,12 +293,7 @@ func runQuery() error {
 	now := time.Now()
 	defer func() {
 		took := time.Since(now)
-		msg := fmt.Sprintf("Query %q took %v to execute.", query, took)
-
-		log.Print(msg)
-
-		// Update info.txt
-		infoBuf.WriteString(msg + "\n")
+		logger.Print(fmt.Sprintf("Query %q took %v to execute.", query, took))
 	}()
 
 	resp, err := clt.Query(client.NewQuery(query, db, ""))
