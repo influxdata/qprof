@@ -38,11 +38,13 @@ Example usage: $ qprof -db mydb -d 5m "SELECT * FROM cpu WHERE tag1 = 'foo'"
 	
 `
 
+// Server connection flags
 var (
 	host       string
 	user, pass string
 )
 
+// Database and query options
 var (
 	query string
 	db    string
@@ -50,6 +52,7 @@ var (
 	d     time.Duration
 )
 
+// Program options
 var (
 	out string
 	cpu bool
@@ -62,6 +65,7 @@ var err error
 var infoBuf bytes.Buffer
 var archivePath string
 var totalExecutions int
+var totalTime time.Duration
 
 // Duplicates writes to os.Stderr and file in archive.
 var stderr io.Writer
@@ -176,6 +180,7 @@ func run() error {
 
 	// Run the queries
 	logger.Print("Begin query execution...")
+	now := time.Now()
 	if d == 0 {
 		for i := 0; i < n; i++ {
 			if err := runQuery(); err != nil {
@@ -196,6 +201,11 @@ func run() error {
 				}
 			}
 		}
+	}
+	totalTime = time.Since(now)
+
+	if totalTime < time.Minute && cpu {
+		fmt.Fprintf(stderr, "\n***** NOTICE - QUERY EXECUTION %v *****\nThis tool works most effectively if queries are executed for at least one minute\nwhen capturing CPU profiles. Consider increasing `-n` or setting `-t 1m`.\n\n", totalTime)
 	}
 
 	// Take the final profiles
