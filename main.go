@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,10 @@ import (
 
 	client "github.com/influxdata/influxdb/client/v2"
 )
+
+// ErrUnsupportedProfile is returned when a profile is not supported on the
+// server.
+var ErrUnsupportedProfile = errors.New("profile unsupported")
 
 type profile struct {
 	Name  string
@@ -145,7 +150,10 @@ func run() error {
 			logger.Print("Capturing CPU profile. This will take 30s...")
 		}
 
-		if err := takeProfile(&buf, p.Name, p.Debug); err != nil {
+		if err := takeProfile(&buf, p.Name, p.Debug); err == ErrUnsupportedProfile {
+			logger.Printf("Skipping profile %q (unavailable or profiling disabled)", p.Name)
+			return nil // unsupported profile.
+		} else if err != nil {
 			return err
 		}
 
@@ -271,6 +279,13 @@ func takeProfile(w io.Writer, name string, debug int) error {
 		return err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrUnsupportedProfile
+	} else if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected error %v returned from server", resp.StatusCode)
+	}
+
 	_, err = io.Copy(w, resp.Body)
 	return err
 }
