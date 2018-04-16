@@ -138,7 +138,12 @@ func main() {
 	// Store options set.
 	infoBuf.WriteString("Flags:\n")
 	flag.VisitAll(func(f *flag.Flag) {
-		if _, err := infoBuf.WriteString(fmt.Sprintf("-%s %v\n", f.Name, f.Value.String())); err != nil {
+		value := f.Value.String()
+		if (f.Name == "user" || f.Name == "pass") && len(value) > 0 { // Don't archive these
+			value = "REDACTED"
+		}
+
+		if _, err := infoBuf.WriteString(fmt.Sprintf("-%s %v\n", f.Name, value)); err != nil {
 			fmt.Fprintln(stderr, err)
 			os.Exit(1)
 		}
