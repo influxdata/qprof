@@ -114,7 +114,7 @@ func main() {
 	flag.IntVar(&n, "n", 1, "Repeat query n times (default 1 if -d not specified)")
 	flag.DurationVar(&d, "t", 0, "Repeat query for this period of time (optional and overrides -n)")
 
-	flag.StringVar(&out, "out", ".", "Output directory (default pwd)")
+	flag.StringVar(&out, "out", ".", "Output directory")
 	flag.BoolVar(&cpu, "cpu", true, "Include CPU profile (will take at least 30s)")
 	flag.Parse()
 

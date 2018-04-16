@@ -39,9 +39,33 @@ This tool works most effectively if queries are executed for at least one minute
 when capturing CPU profiles. Consider increasing `-n` or setting `-t 1m`.
 ```
 
+### Options
+
+```
+⇒  qprof -help
+Usage of qprof:
+  -cpu
+    	Include CPU profile (will take at least 30s) (default true)
+  -db string
+    	Database to query (required)
+  -host string
+    	scheme://host:port of server/cluster/load balancer. (default: http://localhost:8086) 
+  -n int
+    	Repeat query n times (default 1)
+  -out string
+    	Output directory (default pwd) (default ".")
+  -pass string
+    	Password if using authentication (optional)
+  -t duration
+    	Repeat query for this period of time (optional and overrides -n)
+  -user string
+    	Username if using authentication (optional)
+
+```
+
 ### Examples
 
-Here are some example usages:
+Here are some example uses:
 
 ```
 // Run this query for 10m.
