@@ -200,7 +200,7 @@ func run() error {
 	// Take concurrent profiles once queries begin executing.
 	errCh := make(chan error, len(profiles))
 	go func() {
-		defer close(errCh)
+		defer func() { close(errCh) }()
 		log.Print("Waiting 15 seconds before taking concurrent profiles...")
 		time.Sleep(15 * time.Second)
 		for _, p := range profiles {
@@ -242,6 +242,13 @@ func run() error {
 		fmt.Fprintf(stderr, "\n***** NOTICE - QUERY EXECUTION %v *****\nThis tool works most effectively if queries are executed for at least one minute\nwhen capturing CPU profiles. Consider increasing `-n` or setting `-t 1m`.\n\n", totalTime)
 	}
 
+	// Wait for concurrent profiles, if any...
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+
 	// Take the final profiles
 	logger.Print("Taking final profiles...")
 	for _, p := range profiles {
@@ -250,13 +257,6 @@ func run() error {
 		}
 	}
 	logger.Printf("All profiles gathered and saved at %s. Total query executions: %d.", archivePath, totalExecutions)
-
-	// Wait for concurrent profiles, if any...
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
-	}
 
 	// Finally, write the general data about the running of this program.
 	err := tw.WriteHeader(&tar.Header{
@@ -349,7 +349,7 @@ func takeProfile(w io.Writer, name string, debug int) error {
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrUnsupportedProfile
 	} else if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected error %v returned from server", resp.StatusCode)
+		return fmt.Errorf("unexpected error %v returned from server: %s", resp.StatusCode, resp.Header.Get("X-Influxdb-Error"))
 	}
 
 	_, err = io.Copy(w, resp.Body)
