@@ -55,10 +55,11 @@ var (
 
 // Database and query options
 var (
-	query string
-	db    string
-	n     int
-	d     time.Duration
+	query string        // Query to execute
+	db    string        // Database to execute query against.
+	n     int           // Minimum number of times to execute query Each client will execute n queries.
+	c     int           // Number of concurrent clients querying.
+	d     time.Duration // Minimum duration to execute queries for.
 )
 
 // Program options
@@ -115,7 +116,8 @@ func main() {
 	flag.BoolVar(&insecureSSL, "k", false, "Skip SSL certificate validation")
 
 	flag.StringVar(&db, "db", "", "Database to query (required)")
-	flag.IntVar(&n, "n", 1, "Repeat query n times (default 1 if -d not specified)")
+	flag.IntVar(&n, "n", 1, "Repeat query n times")
+	flag.IntVar(&c, "c", 1, "Number of concurrent queries. Each client executes `n` queries or queries for duration `d`")
 	flag.DurationVar(&d, "t", 0, "Repeat query for this period of time (optional and overrides -n)")
 
 	flag.StringVar(&out, "out", ".", "Output directory")
