@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	client "github.com/influxdata/influxdb/client/v2"
@@ -55,10 +56,11 @@ var (
 
 // Database and query options
 var (
-	query string
-	db    string
-	n     int
-	d     time.Duration
+	query string        // Query to execute
+	db    string        // Database to execute query against.
+	n     int           // Minimum number of times to execute query Each client will execute n queries.
+	c     int           // Number of concurrent clients querying.
+	d     time.Duration // Minimum duration to execute queries for.
 )
 
 // Program options
@@ -74,7 +76,7 @@ var err error
 // Used to store relevant data around the execution of this program.
 var infoBuf bytes.Buffer
 var archivePath string
-var totalExecutions int
+var _totalExecutions int64
 var totalTime time.Duration
 
 // Duplicates writes to os.Stderr and file in archive.
@@ -115,7 +117,8 @@ func main() {
 	flag.BoolVar(&insecureSSL, "k", false, "Skip SSL certificate validation")
 
 	flag.StringVar(&db, "db", "", "Database to query (required)")
-	flag.IntVar(&n, "n", 1, "Repeat query n times (default 1 if -d not specified)")
+	flag.IntVar(&n, "n", 1, "Repeat query n times")
+	flag.IntVar(&c, "c", 1, "Number of concurrent queries. Each client executes `n` queries or queries for duration `d`")
 	flag.DurationVar(&d, "t", 0, "Repeat query for this period of time (optional and overrides -n)")
 
 	flag.StringVar(&out, "out", ".", "Output directory")
@@ -193,6 +196,10 @@ func (tw *TarWriter) Write(b []byte) (int, error) {
 	return tw.Writer.Write(b)
 }
 
+func totalExecutions() int64 {
+	return atomic.LoadInt64(&_totalExecutions)
+}
+
 func run() error {
 	var allBuf bytes.Buffer // Buffer for entire archive.
 
@@ -211,9 +218,9 @@ func run() error {
 	}
 
 	// Take concurrent profiles once queries begin executing.
-	errCh := make(chan error, len(profiles))
+	profErrCh := make(chan error, len(profiles))
 	go func() {
-		defer func() { close(errCh) }()
+		defer func() { close(profErrCh) }()
 		log.Print("Waiting 15 seconds before taking concurrent profiles...")
 		time.Sleep(15 * time.Second)
 		for _, p := range profiles {
@@ -221,34 +228,50 @@ func run() error {
 				continue
 			}
 			p.Fname = fmt.Sprintf("concurrent-%s", p.Fname)
-			errCh <- writeProfile(p, tw)
+			profErrCh <- writeProfile(p, tw)
 		}
 	}()
 
 	// Run the queries
 	logger.Print("Begin query execution...")
 	now := time.Now()
-	if d == 0 {
-		for i := 0; i < n; i++ {
-			if err := runQuery(); err != nil {
-				return err
-			}
-		}
-	} else {
-		timer := time.NewTimer(d)
-	OUTER:
-		for {
-			select {
-			case <-timer.C:
-				logger.Printf("Queries executed for at least %v", d)
-				break OUTER
-			default:
-				if err := runQuery(); err != nil {
-					return err
+	queryErrCh := make(chan error, c)
+	for client := 0; client < c; client++ {
+		go func(id int) {
+			if d == 0 {
+				for i := 0; i < n; i++ {
+					if err := runQuery(id); err != nil {
+						queryErrCh <- err
+						return
+					}
+				}
+			} else {
+				timer := time.NewTimer(d)
+			OUTER:
+				for {
+					select {
+					case <-timer.C:
+						logger.Printf("[Worker %d] Queries executed for at least %v", id, d)
+						break OUTER
+					default:
+						if err := runQuery(id); err != nil {
+							queryErrCh <- err
+							return
+						}
+					}
 				}
 			}
+			queryErrCh <- nil
+		}(client)
+	}
+
+	// Wait for queries to finish execution.
+	for i := 0; i < c; i++ {
+		if err := <-queryErrCh; err != nil {
+			return err
 		}
 	}
+	close(queryErrCh)
 	totalTime = time.Since(now)
 
 	if totalTime < time.Minute && cpu {
@@ -256,7 +279,7 @@ func run() error {
 	}
 
 	// Wait for concurrent profiles, if any...
-	for err := range errCh {
+	for err := range profErrCh {
 		if err != nil {
 			return err
 		}
@@ -392,13 +415,13 @@ func NewClient() (client.Client, error) {
 }
 
 // runQuery executes query against the cluster.
-func runQuery() error {
-	totalExecutions++
+func runQuery(id int) error {
+	atomic.AddInt64(&_totalExecutions, 1)
 
 	now := time.Now()
 	defer func() {
 		took := time.Since(now)
-		logger.Print(fmt.Sprintf("Query %q took %v to execute.", query, took))
+		logger.Print(fmt.Sprintf("[Worker %d] Query %q took %v to execute.", id, query, took))
 	}()
 
 	resp, err := clt.Query(client.NewQuery(query, db, ""))

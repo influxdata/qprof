@@ -24,7 +24,8 @@ the flags that `qprof` was initialised with, in a file called `info.txt`.
 ## Usage
 
 Ideally the server under test should have as little traffic as possible, so as to
-ensure accurate profiles.
+ensure accurate profiles. Increasing the concurrency of queries can help to bring 
+the query load to the forefront of the profiles.
 
 The tool can either run a query `n` number of times, or it can keep running the 
 query for a fixed duration of time (using `-d`).
@@ -39,6 +40,12 @@ This tool works most effectively if queries are executed for at least one minute
 when capturing CPU profiles. Consider increasing `-n` or setting `-t 1m`.
 ```
 
+**Short queries** can be difficult to profile if they're only run serially one at
+a time because they often don't involve much CPU work. If the queries are short, 
+e.g., under one seconds, or they're not coming through in profiles, consider 
+increasing the concurrency setting (`-c`) to provide more query load.
+
+
 ### Options
 
 ```
@@ -49,12 +56,12 @@ Usage of qprof:
   -db string
     	Database to query (required)
   -host string
-    	scheme://host:port of server/cluster/load balancer. (default: http://localhost:8086) 
+    	scheme://host:port of server/cluster/load balancer. (default: http://localhost:8086) (default "http://localhost:8086")
   -k	Skip SSL certificate validation
   -n int
-    	Repeat query n times (default 1)
+    	Repeat query n times (default 1 if -d not specified) (default 1)
   -out string
-    	Output directory (default pwd) (default ".")
+    	Output directory (default ".")
   -pass string
     	Password if using authentication (optional)
   -t duration
@@ -71,6 +78,11 @@ Here are some example uses:
 ```
 // Run this query for 10m.
 $ qprof -db mydb -host http://example.com:8086 -t 10m "SELECT count(*) FROM m9 WHERE time > now() - 4m"
+```
+
+```
+// Run this query for 5 minutes using 20 clients.
+$ qprof -db mydb -host http://example.com:8086 -c 20 -t 5m "SELECT count(*) FROM m9 WHERE time > now() - 4m"
 ```
 
 ```
@@ -93,40 +105,41 @@ $ qprof -db mydb -host https://secret.com:8086 -user admin -pass qwertyui -n 5 "
 $ qprof -db mydb -host http://example.com:8086 -cpu=false -n 5 "SELECT count(*) FROM m9 WHERE time > now() - 4m"
 ```
 
-The output will look something like this:
+The output will look something like the following. In this case there is only one
+client worker. Expect more `[Worker x]` prefixes when `-c` is higher than `1`.
 
 ```
 ⇒  qprof -db db -t 1m -out /tmp "SELECT sum(v0) from m0"
-2018/04/16 13:19:04 Host http://localhost:8086 responded to a ping in 6.317739ms
-2018/04/16 13:19:04 Capturing CPU profile. This will take 30s...
-2018/04/16 13:19:34 "profile" profile captured...
-2018/04/16 13:19:34 "block" profile captured...
-2018/04/16 13:19:34 "goroutine" profile captured...
-2018/04/16 13:19:34 "heap" profile captured...
-2018/04/16 13:19:34 "mutex" profile captured...
-2018/04/16 13:19:34 Begin query execution...
-2018/04/16 13:19:34 Waiting 15 seconds before taking concurrent profiles.
-2018/04/16 13:19:39 Query "SELECT sum(v0) from m0" took 5.484053033s to execute.
-2018/04/16 13:19:46 Query "SELECT sum(v0) from m0" took 6.989616778s to execute.
-2018/04/16 13:19:49 Capturing CPU profile. This will take 30s...
-2018/04/16 13:19:56 Query "SELECT sum(v0) from m0" took 9.835411294s to execute.
-2018/04/16 13:20:03 Query "SELECT sum(v0) from m0" took 7.251047777s to execute.
-2018/04/16 13:20:11 Query "SELECT sum(v0) from m0" took 7.595724158s to execute.
-2018/04/16 13:20:17 Query "SELECT sum(v0) from m0" took 6.16515614s to execute.
-2018/04/16 13:20:19 "profile" profile captured...
-2018/04/16 13:20:20 "goroutine" profile captured...
-2018/04/16 13:20:25 Query "SELECT sum(v0) from m0" took 7.584774771s to execute.
-2018/04/16 13:20:31 Query "SELECT sum(v0) from m0" took 5.982338931s to execute.
-2018/04/16 13:20:36 Query "SELECT sum(v0) from m0" took 5.886193173s to execute.
-2018/04/16 13:20:36 Queries executed for at least 1m0s
-2018/04/16 13:20:36 Taking final profiles...
-2018/04/16 13:20:36 Capturing CPU profile. This will take 30s...
-2018/04/16 13:21:06 "profile" profile captured...
-2018/04/16 13:21:06 "block" profile captured...
-2018/04/16 13:21:06 "goroutine" profile captured...
-2018/04/16 13:21:07 "heap" profile captured...
-2018/04/16 13:21:07 "mutex" profile captured...
-2018/04/16 13:21:07 All profiles gathered and saved at /tmp/profiles.tar.gz. Total query executions: 9.
+2018/04/16 13:19:04 [Worker 0] Host http://localhost:8086 responded to a ping in 6.317739ms
+2018/04/16 13:19:04 [Worker 0] Capturing CPU profile. This will take 30s...
+2018/04/16 13:19:34 [Worker 0] "profile" profile captured...
+2018/04/16 13:19:34 [Worker 0] "block" profile captured...
+2018/04/16 13:19:34 [Worker 0] "goroutine" profile captured...
+2018/04/16 13:19:34 [Worker 0] "heap" profile captured...
+2018/04/16 13:19:34 [Worker 0] "mutex" profile captured...
+2018/04/16 13:19:34 [Worker 0] Begin query execution...
+2018/04/16 13:19:34 [Worker 0] Waiting 15 seconds before taking concurrent profiles.
+2018/04/16 13:19:39 [Worker 0] Query "SELECT sum(v0) from m0" took 5.484053033s to execute.
+2018/04/16 13:19:46 [Worker 0] Query "SELECT sum(v0) from m0" took 6.989616778s to execute.
+2018/04/16 13:19:49 [Worker 0] Capturing CPU profile. This will take 30s...
+2018/04/16 13:19:56 [Worker 0] Query "SELECT sum(v0) from m0" took 9.835411294s to execute.
+2018/04/16 13:20:03 [Worker 0] Query "SELECT sum(v0) from m0" took 7.251047777s to execute.
+2018/04/16 13:20:11 [Worker 0] Query "SELECT sum(v0) from m0" took 7.595724158s to execute.
+2018/04/16 13:20:17 [Worker 0] Query "SELECT sum(v0) from m0" took 6.16515614s to execute.
+2018/04/16 13:20:19 [Worker 0] "profile" profile captured...
+2018/04/16 13:20:20 [Worker 0] "goroutine" profile captured...
+2018/04/16 13:20:25 [Worker 0] Query "SELECT sum(v0) from m0" took 7.584774771s to execute.
+2018/04/16 13:20:31 [Worker 0] Query "SELECT sum(v0) from m0" took 5.982338931s to execute.
+2018/04/16 13:20:36 [Worker 0] Query "SELECT sum(v0) from m0" took 5.886193173s to execute.
+2018/04/16 13:20:36 [Worker 0] Queries executed for at least 1m0s
+2018/04/16 13:20:36 [Worker 0] Taking final profiles...
+2018/04/16 13:20:36 [Worker 0] Capturing CPU profile. This will take 30s...
+2018/04/16 13:21:06 [Worker 0] "profile" profile captured...
+2018/04/16 13:21:06 [Worker 0] "block" profile captured...
+2018/04/16 13:21:06 [Worker 0] "goroutine" profile captured...
+2018/04/16 13:21:07 [Worker 0] "heap" profile captured...
+2018/04/16 13:21:07 [Worker 0] "mutex" profile captured...
+2018/04/16 13:21:07 [Worker 0] All profiles gathered and saved at /tmp/profiles.tar.gz. Total query executions: 9.
 ```
 
 ## Analysis
