@@ -292,7 +292,7 @@ func run() error {
 			return err
 		}
 	}
-	logger.Printf("All profiles gathered and saved at %s. Total query executions: %d.", archivePath, totalExecutions)
+	logger.Printf("All profiles gathered and saved at %s. Total query executions: %d.", archivePath, totalExecutions())
 
 	// Finally, write the general data about the running of this program.
 	err := tw.WriteHeader(&tar.Header{
