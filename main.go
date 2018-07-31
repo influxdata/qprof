@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,8 +67,9 @@ var (
 
 // Program options
 var (
-	out string
-	cpu bool
+	out   string
+	cpu   bool
+	quiet bool
 )
 
 var clt client.Client
@@ -77,6 +80,9 @@ var err error
 var infoBuf bytes.Buffer
 var archivePath string
 var _totalExecutions int64
+var _totalExecutionTime int64
+var _minExecutionTime int64 = math.MaxInt64
+var _maxExecutionTime int64
 var totalTime time.Duration
 
 // Duplicates writes to os.Stderr and file in archive.
@@ -123,6 +129,7 @@ func main() {
 
 	flag.StringVar(&out, "out", ".", "Output directory")
 	flag.BoolVar(&cpu, "cpu", true, "Include CPU profile (will take at least 30s)")
+	flag.BoolVar(&quiet, "q", false, "Don't log all individual query executions. Useful for large values of -c")
 	flag.Parse()
 
 	if len(flag.Args()) < 1 {
@@ -196,8 +203,13 @@ func (tw *TarWriter) Write(b []byte) (int, error) {
 	return tw.Writer.Write(b)
 }
 
-func totalExecutions() int64 {
-	return atomic.LoadInt64(&_totalExecutions)
+func totalExecutions() int64          { return atomic.LoadInt64(&_totalExecutions) }
+func minExecutionTime() time.Duration { return time.Duration(atomic.LoadInt64(&_minExecutionTime)) }
+func maxExecutionTime() time.Duration { return time.Duration(atomic.LoadInt64(&_maxExecutionTime)) }
+
+func meanExecutionTime() time.Duration {
+	totalTime := atomic.LoadInt64(&_totalExecutionTime)
+	return time.Duration(totalTime / atomic.LoadInt64(&_totalExecutions))
 }
 
 func run() error {
@@ -232,18 +244,27 @@ func run() error {
 		}
 	}()
 
+	type queryResult struct {
+		err       error
+		durations []time.Duration
+	}
+
 	// Run the queries
 	logger.Print("Begin query execution...")
 	now := time.Now()
-	queryErrCh := make(chan error, c)
+	queryResultCh := make(chan *queryResult, c)
 	for client := 0; client < c; client++ {
 		go func(id int) {
+			var durations []time.Duration
 			if d == 0 {
 				for i := 0; i < n; i++ {
-					if err := runQuery(id); err != nil {
-						queryErrCh <- err
+					took, err := runQuery(id)
+					if err != nil {
+						queryResultCh <- &queryResult{err: err}
 						return
 					}
+
+					durations = append(durations, took)
 				}
 			} else {
 				timer := time.NewTimer(d)
@@ -254,24 +275,31 @@ func run() error {
 						logger.Printf("[Worker %d] Queries executed for at least %v", id, d)
 						break OUTER
 					default:
-						if err := runQuery(id); err != nil {
-							queryErrCh <- err
+						took, err := runQuery(id)
+						if err != nil {
+							queryResultCh <- &queryResult{err: err}
 							return
 						}
+
+						durations = append(durations, took)
 					}
 				}
 			}
-			queryErrCh <- nil
+			queryResultCh <- &queryResult{durations: durations}
 		}(client)
 	}
 
 	// Wait for queries to finish execution.
+	var totalDurations []time.Duration
 	for i := 0; i < c; i++ {
-		if err := <-queryErrCh; err != nil {
-			return err
+		result := <-queryResultCh
+		if result.err != nil {
+			return result.err
 		}
+		totalDurations = append(totalDurations, result.durations...)
 	}
-	close(queryErrCh)
+	sort.Slice(totalDurations, func(i int, j int) bool { return totalDurations[i] < totalDurations[j] })
+	close(queryResultCh)
 	totalTime = time.Since(now)
 
 	if totalTime < time.Minute && cpu {
@@ -292,7 +320,14 @@ func run() error {
 			return err
 		}
 	}
-	logger.Printf("All profiles gathered and saved at %s. Total query executions: %d.", archivePath, totalExecutions())
+	logger.Printf("All profiles gathered and saved at %s.\nTotal query executions: %d\nTotal execution time: %v (%d q/s)\nMean query execution: %v\nMedian query exectution: %v\nMin query execution: %v\nMax query execution: %v\n",
+		archivePath,
+		totalExecutions(),
+		totalTime, totalExecutions()/int64(totalTime/time.Second),
+		meanExecutionTime(),
+		totalDurations[len(totalDurations)/2], // TODO(edd): consider even slice lengths.
+		minExecutionTime(), maxExecutionTime(),
+	)
 
 	// Finally, write the general data about the running of this program.
 	err := tw.WriteHeader(&tar.Header{
@@ -415,18 +450,45 @@ func NewClient() (client.Client, error) {
 }
 
 // runQuery executes query against the cluster.
-func runQuery(id int) error {
+func runQuery(id int) (took time.Duration, err error) {
 	atomic.AddInt64(&_totalExecutions, 1)
 
 	now := time.Now()
 	defer func() {
-		took := time.Since(now)
-		logger.Print(fmt.Sprintf("[Worker %d] Query %q took %v to execute.", id, query, took))
+		took = time.Since(now)
+		if !quiet {
+			logger.Print(fmt.Sprintf("[Worker %d] Query %q took %v to execute.", id, query, took))
+		}
+
+		// Is this the shortest execution?
+		for {
+			min := minExecutionTime()
+			if took < min {
+				if !atomic.CompareAndSwapInt64(&_minExecutionTime, int64(min), int64(took)) {
+					continue
+				}
+			}
+			break
+		}
+
+		// Is this the longest execution?
+		for {
+			max := maxExecutionTime()
+			if took > max {
+				if !atomic.CompareAndSwapInt64(&_maxExecutionTime, int64(max), int64(took)) {
+					continue
+				}
+			}
+			break
+		}
+
+		// Update total time
+		atomic.AddInt64(&_totalExecutionTime, int64(took))
 	}()
 
 	resp, err := clt.Query(client.NewQuery(query, db, ""))
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return resp.Error()
+	return took, resp.Error()
 }
