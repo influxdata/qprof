@@ -1,0 +1,4 @@
+# github.com/influxdata/influxdb v0.0.0-20191010223309-589d278b24fe
+github.com/influxdata/influxdb/client/v2
+github.com/influxdata/influxdb/models
+github.com/influxdata/influxdb/pkg/escape
